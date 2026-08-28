@@ -16,8 +16,9 @@ const insight = z.object({
 const models = [
   process.env.REFLECT_AI_MODEL,
   'google/gemini-2.5-flash',
+  'google/gemini-2.5-flash-lite',
+  'anthropic/claude-3-haiku',
   'openai/gpt-4.1-mini',
-  'anthropic/claude-3-5-haiku',
 ].filter((model, index, list): model is string => Boolean(model) && list.indexOf(model) === index)
 
 export async function POST(_: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -26,6 +27,7 @@ export async function POST(_: Request, { params }: { params: Promise<{ id: strin
   const prompt = `Analyze this journal entry deeply. Do not merely summarize it. Return specific, constructive guidance grounded only in the writing.\n\nTheme: ${entry.theme}\nPrompt: ${entry.prompt}\nJournal: ${entry.content}`
   let lastError: unknown
   for (const model of models) {
+    if (!model) continue
     try {
       const result = await generateText({
         model,
