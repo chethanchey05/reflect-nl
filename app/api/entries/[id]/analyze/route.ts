@@ -13,20 +13,35 @@ const insight = z.object({
   reflectionQuestions: z.array(z.string().min(1).max(280)).min(2).max(3),
 })
 
+const models = [
+  process.env.REFLECT_AI_MODEL,
+  'google/gemini-2.5-flash',
+  'openai/gpt-4.1-mini',
+  'anthropic/claude-3-5-haiku',
+].filter((model, index, list): model is string => Boolean(model) && list.indexOf(model) === index)
+
 export async function POST(_: Request, { params }: { params: Promise<{ id: string }> }) {
   const entry = await getEntry((await params).id)
   if (!entry) return NextResponse.json({ error: 'Reflection not found.' }, { status: 404 })
-  try {
-    const result = await generateText({
-      model: process.env.REFLECT_AI_MODEL ?? 'google/gemini-2.5-flash',
-      output: Output.object({ schema: insight }),
-      system: 'You are Reflect, an intellectually useful reflection companion for technology leaders. Analyze only what the journal supports. Distinguish facts from assumptions. Identify leadership behaviors, tensions, blind spots, root causes, opportunities, and long-term implications. Be specific, constructive, professional, and empathetic. Never make medical, psychological, or diagnostic claims. Return the requested structured JSON only.',
-      prompt: `Analyze this journal entry deeply. Do not merely summarize it.\n\nTheme: ${entry.theme}\nPrompt: ${entry.prompt}\nJournal: ${entry.content}`,
-    })
-    const output = result.output
-    const [updated] = await db.update(journalEntries).set({ sentiment: output.sentiment, summary: output.aiInsight, keyThemes: output.keyThemes.map((item) => `${item.theme}: ${item.description}`), deeperReflection: output.deeperReflection, reflectionQuestions: output.reflectionQuestions, followUpQuestion: output.reflectionQuestions[0], updatedAt: new Date() }).where(eq(journalEntries.id, entry.id)).returning()
-    return NextResponse.json(updated)
-  } catch {
-    return NextResponse.json({ error: 'Analysis could not be completed. Your reflection is safe. You can retry later.' }, { status: 503 })
+  const prompt = `Analyze this journal entry deeply. Do not merely summarize it. Return specific, constructive guidance grounded only in the writing.\n\nTheme: ${entry.theme}\nPrompt: ${entry.prompt}\nJournal: ${entry.content}`
+  let lastError: unknown
+  for (const model of models) {
+    try {
+      const result = await generateText({
+        model,
+        output: Output.object({ schema: insight }),
+        system: 'You are Reflect, an intellectually useful reflection companion for technology leaders. Identify the central insight, key themes with brief explanations, deeper observations, and thoughtful questions. Never make medical, psychological, or diagnostic claims. Return structured JSON only.',
+        prompt,
+      })
+      const output = result.output
+      const [updated] = await db.update(journalEntries).set({ sentiment: output.sentiment, summary: output.aiInsight, keyThemes: output.keyThemes.map((item) => `${item.theme}: ${item.description}`), deeperReflection: output.deeperReflection, reflectionQuestions: output.reflectionQuestions, followUpQuestion: output.reflectionQuestions[0], updatedAt: new Date() }).where(eq(journalEntries.id, entry.id)).returning()
+      return NextResponse.json(updated)
+    } catch (error) {
+      lastError = error
+    }
   }
+  console.error('[v0] All reflection insight models failed', lastError)
+  return NextResponse.json({ error: 'AI insight is temporarily unavailable. Your reflection is safe and can be analyzed again.' }, { status: 503 })
 }
+
+export const maxDuration = 60
