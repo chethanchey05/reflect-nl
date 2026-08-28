@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { generateText, Output } from 'ai'
+import { createGoogleGenerativeAI } from '@ai-sdk/google'
 import { z } from 'zod'
 import { db, journalEntries } from '@/lib/db'
 import { eq } from 'drizzle-orm'
@@ -13,13 +14,18 @@ const insight = z.object({
   reflectionQuestions: z.array(z.string().min(1).max(280)).min(2).max(3),
 })
 
-const models = [
+const gatewayModels = [
   process.env.REFLECT_AI_MODEL,
   'google/gemini-2.5-flash',
   'google/gemini-2.5-flash-lite',
   'anthropic/claude-3-haiku',
   'openai/gpt-4.1-mini',
 ].filter((model, index, list): model is string => Boolean(model) && list.indexOf(model) === index)
+
+const models = [
+  ...(process.env.GEMINI_API_KEY_2 ? [createGoogleGenerativeAI({ apiKey: process.env.GEMINI_API_KEY_2 })('gemini-2.5-flash')] : []),
+  ...gatewayModels,
+]
 
 export async function POST(_: Request, { params }: { params: Promise<{ id: string }> }) {
   const entry = await getEntry((await params).id)
