@@ -1,55 +1,52 @@
 import { NextResponse } from 'next/server'
-import { generateText, Output } from 'ai'
-import { createGoogleGenerativeAI } from '@ai-sdk/google'
-import { z } from 'zod'
 import { db, journalEntries } from '@/lib/db'
-import { eq } from 'drizzle-orm'
 import { getEntry } from '@/lib/server'
+import { eq } from 'drizzle-orm'
 
-const insight = z.object({
-  sentiment: z.enum(['Positive', 'Neutral', 'Reflective', 'Challenging', 'Concerned']),
-  aiInsight: z.string().min(1).max(700),
-  keyThemes: z.array(z.object({ theme: z.string().min(1).max(80), description: z.string().min(1).max(240) })).min(3).max(5),
-  deeperReflection: z.array(z.string().min(1).max(300)).min(2).max(4),
-  reflectionQuestions: z.array(z.string().min(1).max(280)).min(2).max(3),
-})
+const positiveWords = ['progress', 'success', 'proud', 'clear', 'improved', 'strong', 'confident', 'learned', 'celebrate', 'effective']
+const concernWords = ['risk', 'blocked', 'pressure', 'worried', 'concern', 'friction', 'debt', 'unclear', 'shortage', 'failure', 'mistake']
+const themeSignals: Record<string, string[]> = {
+  'Technical health': ['technical', 'architecture', 'testing', 'test', 'reliability', 'debt', 'code', 'system', 'quality'],
+  'Delivery and execution': ['delivery', 'ship', 'deadline', 'predictability', 'roadmap', 'release', 'execution', 'shortcut'],
+  'Business alignment': ['business', 'customer', 'stakeholder', 'roi', 'value', 'metric', 'outcome', 'revenue'],
+  'Team leadership': ['team', 'engineer', 'coaching', 'leadership', 'collaboration', 'feedback', 'safety', 'people'],
+  'Organizational influence': ['organization', 'culture', 'cross-team', 'process', 'influence', 'hiring', 'org'],
+}
 
-const gatewayModels = [
-  process.env.REFLECT_AI_MODEL,
-  'google/gemini-2.5-flash',
-  'google/gemini-2.5-flash-lite',
-  'anthropic/claude-3-haiku',
-  'openai/gpt-4.1-mini',
-].filter((model, index, list): model is string => Boolean(model) && list.indexOf(model) === index)
+function countMatches(text: string, words: string[]) {
+  return words.reduce((count, word) => count + (text.includes(word) ? 1 : 0), 0)
+}
 
-const models = [
-  ...(process.env.GEMINI_API_KEY_2 ? [createGoogleGenerativeAI({ apiKey: process.env.GEMINI_API_KEY_2 })('gemini-2.5-flash')] : []),
-  ...gatewayModels,
-]
+function analyzeReflection(content: string, theme: string) {
+  const normalized = content.toLowerCase()
+  const concerns = countMatches(normalized, concernWords)
+  const positives = countMatches(normalized, positiveWords)
+  const sentiment = concerns > positives ? 'Challenging' : positives > concerns ? 'Positive' : 'Reflective'
+  const themes = Object.entries(themeSignals).map(([label, signals]) => ({ label, score: countMatches(normalized, signals) })).filter((item) => item.score > 0).sort((a, b) => b.score - a.score).slice(0, 4)
+  const keyThemes = (themes.length ? themes : [{ label: theme, score: 1 }]).map(({ label }) => `${label}: This reflection connects to your focus on ${label.toLowerCase()}.`)
+  const firstSentence = content.trim().split(/(?<=[.!?])\s+/)[0] ?? content.trim()
+  const insight = concerns > positives
+    ? `Your reflection surfaces meaningful tension around ${theme.toLowerCase()}. The clearest opportunity is to turn the concern you named into one small, visible leadership action.`
+    : positives > concerns
+      ? `Your reflection shows momentum in ${theme.toLowerCase()}. Capture what made this progress possible so it can become a repeatable leadership practice.`
+      : `Your reflection is thoughtfully examining ${theme.toLowerCase()}. Naming the decision, trade-off, or pattern underneath your observation can help turn awareness into action.`
+  const deeperReflection = [
+    `The opening of your reflection points to: “${firstSentence.slice(0, 180)}${firstSentence.length > 180 ? '…' : ''}”`,
+    concerns ? 'There is a tension worth making explicit: what matters most now, and what are you intentionally choosing not to optimize yet?' : 'Look for the behavior or decision behind the outcome, not only the outcome itself.',
+  ]
+  const reflectionQuestions = [
+    `What is one concrete action you can take this week to strengthen ${theme.toLowerCase()}?`,
+    concerns ? 'What support, constraint, or conversation would make this challenge easier to address?' : 'How will you know that this insight has changed the way you lead?',
+  ]
+  return { sentiment, summary: insight, keyThemes, deeperReflection, reflectionQuestions, followUpQuestion: reflectionQuestions[0] }
+}
 
 export async function POST(_: Request, { params }: { params: Promise<{ id: string }> }) {
   const entry = await getEntry((await params).id)
   if (!entry) return NextResponse.json({ error: 'Reflection not found.' }, { status: 404 })
-  const prompt = `Analyze this journal entry deeply. Do not merely summarize it. Return specific, constructive guidance grounded only in the writing.\n\nTheme: ${entry.theme}\nPrompt: ${entry.prompt}\nJournal: ${entry.content}`
-  let lastError: unknown
-  for (const model of models) {
-    if (!model) continue
-    try {
-      const result = await generateText({
-        model,
-        output: Output.object({ schema: insight }),
-        system: 'You are Reflect, an intellectually useful reflection companion for technology leaders. Identify the central insight, key themes with brief explanations, deeper observations, and thoughtful questions. Never make medical, psychological, or diagnostic claims. Return structured JSON only.',
-        prompt,
-      })
-      const output = result.output
-      const [updated] = await db.update(journalEntries).set({ sentiment: output.sentiment, summary: output.aiInsight, keyThemes: output.keyThemes.map((item) => `${item.theme}: ${item.description}`), deeperReflection: output.deeperReflection, reflectionQuestions: output.reflectionQuestions, followUpQuestion: output.reflectionQuestions[0], updatedAt: new Date() }).where(eq(journalEntries.id, entry.id)).returning()
-      return NextResponse.json(updated)
-    } catch (error) {
-      lastError = error
-    }
-  }
-  console.error('[v0] All reflection insight models failed', lastError)
-  return NextResponse.json({ error: 'AI insight is temporarily unavailable. Your reflection is safe and can be analyzed again.' }, { status: 503 })
+  const output = analyzeReflection(entry.content, entry.theme)
+  const [updated] = await db.update(journalEntries).set({ sentiment: output.sentiment, summary: output.summary, keyThemes: output.keyThemes, deeperReflection: output.deeperReflection, reflectionQuestions: output.reflectionQuestions, followUpQuestion: output.followUpQuestion, updatedAt: new Date() }).where(eq(journalEntries.id, entry.id)).returning()
+  return NextResponse.json(updated)
 }
 
-export const maxDuration = 60
+export const maxDuration = 10
